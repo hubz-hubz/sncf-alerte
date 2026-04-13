@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 from playwright.async_api import async_playwright
 from twilio.rest import Client
 
@@ -9,13 +10,28 @@ TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")
 MY_WHATSAPP_NUMBER = os.environ.get("MY_WHATSAPP_NUMBER")
 
-TARGET_ORIGIN = "PARIS MONTPARNASSE"
-TARGET_DESTINATION = "ARCACHON"
-TARGET_DATE = "30/04/2026"
+TARGET_ORIGIN = "Paris Montparnasse"
+TARGET_DESTINATION = "Arcachon"
+TARGET_DATE = "2026-04-30"
 TARGET_DEPARTURE = "18:38"
 WHATSAPP_MESSAGE = (
     "🚆 Place dispo ! PARIS → ARCACHON 30/04 18h38 - "
     "Réserve vite : https://www.sncf-connect.com"
+)
+
+SCREENSHOTS_DIR = Path("screenshots")
+SCREENSHOTS_DIR.mkdir(exist_ok=True)
+
+# URL directe vers les résultats de recherche SNCF Connect
+# FRPMO = Paris Montparnasse, FRARC = Arcachon
+SEARCH_URL = (
+    "https://www.sncf-connect.com/app/trips/search"
+    "?originCode=FRPMO"
+    "&destinationCode=FRARC"
+    "&outwardDate=2026-04-30T18%3A00%3A00"
+    "&passengers=%5B%7B%22age%22%3A%22ADULT%22%7D%5D"
+    "&directTravel=false"
+    "&selectedOptions=%7B%7D"
 )
 
 
@@ -31,7 +47,7 @@ def send_whatsapp_alert():
 
 
 async def check_availability():
-    print(f"[INFO] Démarrage de la vérification pour {TARGET_ORIGIN} → {TARGET_DESTINATION} le {TARGET_DATE} à {TARGET_DEPARTURE}")
+    print(f"[INFO] Démarrage de la vérification : {TARGET_ORIGIN} → {TARGET_DESTINATION} le {TARGET_DATE} à {TARGET_DEPARTURE}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -41,140 +57,101 @@ async def check_availability():
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/123.0.0.0 Safari/537.36"
             ),
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1280, "height": 900},
+            locale="fr-FR",
         )
         page = await context.new_page()
 
-        print("[INFO] Ouverture de sncf-connect.com...")
-        await page.goto("https://www.sncf-connect.com", wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(3000)
+        # --- Étape 1 : navigation directe vers les résultats ---
+        print(f"[INFO] Navigation vers l'URL de recherche directe...")
+        print(f"[INFO] URL : {SEARCH_URL}")
+        await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(4000)
+        await page.screenshot(path=str(SCREENSHOTS_DIR / "01_page_loaded.png"))
+        print(f"[INFO] URL actuelle après chargement : {page.url}")
 
-        # Fermer le bandeau cookies si présent
+        # --- Fermer le bandeau cookies ---
         try:
-            cookie_button = page.locator("button[id*='accept'], button[aria-label*='accepter'], button[aria-label*='Accepter']").first
-            if await cookie_button.is_visible(timeout=5000):
-                await cookie_button.click()
-                print("[INFO] Bandeau cookies fermé.")
-                await page.wait_for_timeout(1000)
+            for selector in [
+                "button#didomi-notice-agree-button",
+                "button[id*='accept']",
+                "button[aria-label*='accepter']",
+                "button[aria-label*='Accepter']",
+                "#axeptio_btn_acceptAll",
+            ]:
+                btn = page.locator(selector).first
+                if await btn.is_visible(timeout=3000):
+                    await btn.click()
+                    print(f"[INFO] Bandeau cookies fermé via : {selector}")
+                    await page.wait_for_timeout(2000)
+                    break
         except Exception:
             print("[INFO] Pas de bandeau cookies détecté.")
 
-        # Champ origine
-        print(f"[INFO] Saisie de l'origine : {TARGET_ORIGIN}")
+        await page.wait_for_timeout(5000)
+        await page.screenshot(path=str(SCREENSHOTS_DIR / "02_after_cookies.png"))
+
+        # --- Attendre que la page de résultats se charge ---
+        print("[INFO] Attente du chargement des résultats...")
         try:
-            origin_input = page.locator("input[placeholder*='Départ'], input[aria-label*='Départ'], input[id*='origin']").first
-            await origin_input.click(timeout=10000)
-            await origin_input.fill(TARGET_ORIGIN)
-            await page.wait_for_timeout(2000)
-            suggestion = page.locator(f"text={TARGET_ORIGIN}").first
-            await suggestion.click(timeout=8000)
-            print(f"[INFO] Origine sélectionnée : {TARGET_ORIGIN}")
-        except Exception as e:
-            print(f"[ERREUR] Impossible de saisir l'origine : {e}")
-            await browser.close()
-            return
+            await page.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            print("[INFO] networkidle timeout — on continue quand même.")
 
-        # Champ destination
-        print(f"[INFO] Saisie de la destination : {TARGET_DESTINATION}")
-        try:
-            dest_input = page.locator("input[placeholder*='Arrivée'], input[aria-label*='Arrivée'], input[id*='destination']").first
-            await dest_input.click(timeout=10000)
-            await dest_input.fill(TARGET_DESTINATION)
-            await page.wait_for_timeout(2000)
-            suggestion = page.locator(f"text={TARGET_DESTINATION}").first
-            await suggestion.click(timeout=8000)
-            print(f"[INFO] Destination sélectionnée : {TARGET_DESTINATION}")
-        except Exception as e:
-            print(f"[ERREUR] Impossible de saisir la destination : {e}")
-            await browser.close()
-            return
+        await page.wait_for_timeout(3000)
+        await page.screenshot(path=str(SCREENSHOTS_DIR / "03_results.png"))
+        print(f"[INFO] URL finale : {page.url}")
 
-        # Sélection de la date
-        print(f"[INFO] Saisie de la date : {TARGET_DATE}")
-        try:
-            date_input = page.locator("input[type='date'], input[aria-label*='date'], button[aria-label*='date']").first
-            await date_input.click(timeout=10000)
-            await page.wait_for_timeout(1000)
-            await page.keyboard.type(TARGET_DATE)
-            await page.wait_for_timeout(1000)
-        except Exception as e:
-            print(f"[ERREUR] Impossible de saisir la date : {e}")
-            await browser.close()
-            return
-
-        # Lancement de la recherche
-        print("[INFO] Lancement de la recherche...")
-        try:
-            search_button = page.locator("button[type='submit'], button[aria-label*='Rechercher'], button[aria-label*='rechercher']").first
-            await search_button.click(timeout=10000)
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await page.wait_for_timeout(3000)
-        except Exception as e:
-            print(f"[ERREUR] Impossible de lancer la recherche : {e}")
-            await browser.close()
-            return
-
-        print(f"[INFO] URL de résultats : {page.url}")
-
-        # Récupération du contenu de la page
+        # --- Analyse du contenu ---
         content = await page.content()
+        page_text = await page.evaluate("document.body.innerText")
 
-        # Recherche du train cible (18:38)
-        print(f"[INFO] Recherche du train {TARGET_DEPARTURE}...")
-        if TARGET_DEPARTURE not in content:
-            print(f"[INFO] Le train {TARGET_DEPARTURE} n'est pas visible sur la page. Il est peut-être sur une autre date ou absent.")
+        print(f"[INFO] Longueur du contenu HTML : {len(content)} caractères")
+        print(f"[INFO] Aperçu du texte de la page :")
+        print(page_text[:1000])
+        print("...")
+
+        # --- Recherche du train 18:38 ---
+        print(f"\n[INFO] Recherche du train {TARGET_DEPARTURE} dans la page...")
+
+        if TARGET_DEPARTURE not in page_text and TARGET_DEPARTURE not in content:
+            print(f"[INFO] '{TARGET_DEPARTURE}' introuvable sur la page.")
+            print("[INFO] Mots-clés présents (debug) :")
+            for kw in ["Complet", "complet", "Indisponible", "dispo", "€", "TGV", "Intercités", "train"]:
+                count = page_text.lower().count(kw.lower())
+                if count:
+                    print(f"  - '{kw}' : {count} fois")
             await browser.close()
             return
 
-        # Détection de la disponibilité autour du train 18:38
-        # On cherche les blocs qui contiennent 18:38 et qui ne sont pas "Complet" / "Indisponible"
-        train_cards = page.locator(f"[class*='train'], [class*='journey'], [class*='proposal'], article").all()
-        found = False
+        # Chercher le bloc contenant 18:38 et analyser la disponibilité
+        unavailable_keywords = ["complet", "indisponible", "non disponible", "épuisé", "sold out"]
         available = False
 
-        try:
-            cards = await train_cards
-            for card in cards:
-                card_text = await card.inner_text()
-                if TARGET_DEPARTURE in card_text:
-                    found = True
-                    print(f"[INFO] Train {TARGET_DEPARTURE} trouvé. Contenu : {card_text[:200]}")
-                    unavailable_keywords = ["Complet", "Indisponible", "Non disponible", "Épuisé"]
-                    if any(kw.lower() in card_text.lower() for kw in unavailable_keywords):
-                        print(f"[INFO] Train {TARGET_DEPARTURE} : COMPLET ou INDISPONIBLE.")
-                    else:
-                        available = True
-                        print(f"[INFO] Train {TARGET_DEPARTURE} : PLACES DISPONIBLES !")
-                    break
-        except Exception:
-            pass
+        # Analyse par blocs de texte autour de 18:38
+        idx = page_text.find(TARGET_DEPARTURE)
+        if idx != -1:
+            snippet = page_text[max(0, idx - 300):idx + 600]
+            print(f"[INFO] Contexte autour de {TARGET_DEPARTURE} :")
+            print(snippet)
+            print()
 
-        if not found:
-            # Fallback : analyse du texte brut autour de 18:38
-            idx = content.find(TARGET_DEPARTURE)
-            if idx != -1:
-                snippet = content[max(0, idx - 200):idx + 500]
-                found = True
-                unavailable_keywords = ["Complet", "Indisponible", "Non disponible", "Épuisé"]
-                if any(kw.lower() in snippet.lower() for kw in unavailable_keywords):
-                    print(f"[INFO] Train {TARGET_DEPARTURE} : COMPLET ou INDISPONIBLE (fallback texte).")
-                else:
-                    available = True
-                    print(f"[INFO] Train {TARGET_DEPARTURE} : PLACES DISPONIBLES (fallback texte) !")
+            if any(kw in snippet.lower() for kw in unavailable_keywords):
+                print(f"[INFO] Train {TARGET_DEPARTURE} : COMPLET ou INDISPONIBLE.")
+            else:
+                available = True
+                print(f"[INFO] Train {TARGET_DEPARTURE} : PLACES DISPONIBLES !")
 
         await browser.close()
 
         if available:
             send_whatsapp_alert()
         else:
-            print("[INFO] Aucune place disponible pour ce train. Pas d'alerte envoyée.")
+            print("[INFO] Aucune place disponible. Pas d'alerte envoyée.")
 
 
 def check_env():
-    missing = []
-    for var in ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM", "MY_WHATSAPP_NUMBER"]:
-        if not os.environ.get(var):
-            missing.append(var)
+    missing = [v for v in ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM", "MY_WHATSAPP_NUMBER"] if not os.environ.get(v)]
     if missing:
         print(f"[ERREUR] Variables d'environnement manquantes : {', '.join(missing)}")
         sys.exit(1)
